@@ -107,6 +107,15 @@ const OVERVIEW_GESTURE_RUBBER_BAND: RubberBand = RubberBand {
     limit: 0.05,
 };
 
+/// Animation config for the overview filter show/hide transitions.
+const OVERVIEW_FILTER_ANIM: niri_config::Animation = niri_config::Animation {
+    off: false,
+    kind: niri_config::animations::Kind::Easing(niri_config::animations::EasingParams {
+        duration_ms: 150,
+        curve: niri_config::animations::Curve::EaseOutCubic,
+    }),
+};
+
 /// Size-relative units.
 pub struct SizeFrac;
 
@@ -318,6 +327,14 @@ pub trait LayoutElement {
 
     fn is_child_of(&self, parent: &Self) -> bool;
 
+    fn title(&self) -> Option<String> {
+        None
+    }
+
+    fn app_id(&self) -> Option<String> {
+        None
+    }
+
     fn rules(&self) -> &ResolvedWindowRules;
 
     /// Runs periodic clean-up tasks.
@@ -364,6 +381,8 @@ pub struct Layout<W: LayoutElement> {
     overview_open: bool,
     /// The overview zoom progress.
     overview_progress: Option<OverviewProgress>,
+    /// Current overview filter text, typed by the user while overview is open.
+    overview_filter: String,
     /// Configurable properties of the layout.
     options: Rc<Options>,
 }
@@ -703,6 +722,7 @@ impl<W: LayoutElement> Layout<W> {
             update_render_elements_time: Duration::ZERO,
             overview_open: false,
             overview_progress: None,
+            overview_filter: String::new(),
             options: Rc::new(options),
         }
     }
@@ -728,6 +748,7 @@ impl<W: LayoutElement> Layout<W> {
             update_render_elements_time: Duration::ZERO,
             overview_open: false,
             overview_progress: None,
+            overview_filter: String::new(),
             options: opts,
         }
     }
@@ -4596,6 +4617,20 @@ impl<W: LayoutElement> Layout<W> {
     pub fn toggle_overview(&mut self) {
         self.overview_open = !self.overview_open;
 
+        // Clear filter and instantly reset tile alpha when closing so dimmed tiles don't
+        // fade back in during the close animation.
+        if !self.overview_open {
+            self.overview_filter.clear();
+            for ws in self.workspaces_mut() {
+                for tile in ws.tiles_mut() {
+                    tile.ensure_alpha_animates_to_1();
+                }
+            }
+            if let Some(move_) = self.interactive_move.as_mut().and_then(|s| s.moving_mut()) {
+                move_.tile.ensure_alpha_animates_to_1();
+            }
+        }
+
         let from = self.overview_progress.take().map_or(0., |p| p.value());
         let to = if self.overview_open { 1. } else { 0. };
 
@@ -4626,6 +4661,56 @@ impl<W: LayoutElement> Layout<W> {
 
         self.toggle_overview();
         true
+    }
+
+    pub fn overview_filter_text(&self) -> &str {
+        &self.overview_filter
+    }
+
+    pub fn overview_filter_push(&mut self, ch: char) {
+        self.overview_filter.push(ch);
+        self.apply_overview_filter();
+    }
+
+    pub fn overview_filter_pop(&mut self) {
+        if self.overview_filter.is_empty() {
+            return;
+        }
+        self.overview_filter.pop();
+        self.apply_overview_filter();
+    }
+
+    pub fn overview_filter_clear(&mut self) {
+        if self.overview_filter.is_empty() {
+            return;
+        }
+        self.overview_filter.clear();
+        self.apply_overview_filter();
+    }
+
+    /// Re-applies the current filter to all tiles; use after config or window changes.
+    pub fn reapply_overview_filter(&mut self) {
+        if !self.overview_filter.is_empty() {
+            self.apply_overview_filter();
+        }
+    }
+
+    fn apply_overview_filter(&mut self) {
+        let filter = self.overview_filter.to_lowercase();
+        let dim_opacity = self.options.overview.filter_dim_opacity.clamp(0., 1.);
+
+        // Also update the interactively-moved tile if present.
+        if let Some(move_) = self.interactive_move.as_mut().and_then(|s| s.moving_mut()) {
+            let matches = filter_matches_tile(move_.tile.window(), &filter);
+            set_tile_filter_alpha(&mut move_.tile, matches, dim_opacity);
+        }
+
+        for ws in self.workspaces_mut() {
+            for tile in ws.tiles_mut() {
+                let matches = filter_matches_tile(tile.window(), &filter);
+                set_tile_filter_alpha(tile, matches, dim_opacity);
+            }
+        }
     }
 
     pub fn toggle_overview_to_workspace(&mut self, ws_idx: usize) {
@@ -5008,6 +5093,30 @@ impl<W: LayoutElement> Layout<W> {
 impl<W: LayoutElement> Default for MonitorSet<W> {
     fn default() -> Self {
         Self::NoOutputs { workspaces: vec![] }
+    }
+}
+
+fn filter_matches_tile<W: LayoutElement>(window: &W, filter_lower: &str) -> bool {
+    if filter_lower.is_empty() {
+        return true;
+    }
+    let title_match = window
+        .title()
+        .map(|t| t.to_lowercase().contains(filter_lower))
+        .unwrap_or(false);
+    let app_id_match = window
+        .app_id()
+        .map(|a| a.to_lowercase().contains(filter_lower))
+        .unwrap_or(false);
+    title_match || app_id_match
+}
+
+fn set_tile_filter_alpha<W: LayoutElement>(tile: &mut Tile<W>, matches: bool, dim_opacity: f64) {
+    if matches {
+        tile.animate_alpha(tile.current_alpha(), 1., OVERVIEW_FILTER_ANIM);
+    } else {
+        // No hold_after_done: advance_animations keeps sub-1 target animations alive.
+        tile.animate_alpha(tile.current_alpha(), dim_opacity, OVERVIEW_FILTER_ANIM);
     }
 }
 

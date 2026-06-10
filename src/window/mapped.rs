@@ -626,6 +626,14 @@ impl LayoutElement for Mapped {
         &self.window
     }
 
+    fn title(&self) -> Option<String> {
+        with_toplevel_role(self.toplevel(), |role| role.title.clone())
+    }
+
+    fn app_id(&self) -> Option<String> {
+        with_toplevel_role(self.toplevel(), |role| role.app_id.clone())
+    }
+
     fn update_config(&mut self, blur_config: niri_config::Blur) {
         self.blur_config = blur_config;
     }

@@ -2048,11 +2048,8 @@ impl<W: LayoutElement> Workspace<W> {
             assert_abs_diff_eq!(tile_pos.y, rounded_pos.y, epsilon = 1e-5);
 
             if let Some(alpha) = &tile.alpha_animation {
-                let anim = &alpha.anim;
-                if visible {
-                    assert_eq!(anim.to(), 1., "visible tiles can animate alpha only to 1");
-                }
-
+                // The overview filter may legitimately dim visible tiles to less than 1.0, so
+                // we no longer assert anim.to() == 1.0 for visible tiles.
                 assert!(
                     !alpha.hold_after_done,
                     "tiles in the layout cannot have held alpha animation"

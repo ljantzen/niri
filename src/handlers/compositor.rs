@@ -221,6 +221,8 @@ impl CompositorHandler for State {
                         activate,
                     );
                     let output = output.cloned();
+                    // Apply the overview filter to the newly mapped window.
+                    self.niri.layout.reapply_overview_filter();
 
                     // The window state cannot contain Fullscreen and Maximized at once. Therefore,
                     // if the window ended up fullscreen, then we only know that it is also

@@ -41,6 +41,8 @@ struct TestWindowInner {
     animate_next_configure: Cell<bool>,
     animation_snapshot: RefCell<Option<LayoutElementRenderSnapshot>>,
     rules: ResolvedWindowRules,
+    title: Option<String>,
+    app_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +61,10 @@ struct TestWindowParams {
     min_max_size: (Size<i32, Logical>, Size<i32, Logical>),
     #[proptest(strategy = "prop::option::of(arbitrary_rules())")]
     rules: Option<ResolvedWindowRules>,
+    #[proptest(strategy = "Just(None)")]
+    title: Option<String>,
+    #[proptest(strategy = "Just(None)")]
+    app_id: Option<String>,
 }
 
 impl TestWindowParams {
@@ -70,6 +76,8 @@ impl TestWindowParams {
             bbox: Rectangle::from_size(Size::from((100, 200))),
             min_max_size: Default::default(),
             rules: None,
+            title: None,
+            app_id: None,
         }
     }
 }
@@ -93,6 +101,8 @@ impl TestWindow {
             animate_next_configure: Cell::new(false),
             animation_snapshot: RefCell::new(None),
             rules: params.rules.unwrap_or_default(),
+            title: params.title,
+            app_id: params.app_id,
         }))
     }
 
@@ -257,6 +267,14 @@ impl LayoutElement for TestWindow {
 
     fn is_child_of(&self, parent: &Self) -> bool {
         self.0.parent_id.get() == Some(parent.0.id)
+    }
+
+    fn title(&self) -> Option<String> {
+        self.0.title.clone()
+    }
+
+    fn app_id(&self) -> Option<String> {
+        self.0.app_id.clone()
     }
 
     fn refresh(&self) {}
@@ -749,6 +767,14 @@ enum Op {
         window: usize,
     },
     ToggleOverview,
+    OverviewFilterPush(
+        #[proptest(
+            strategy = "proptest::char::ranges(std::borrow::Cow::Borrowed(&['\x20'..='\x7e']))"
+        )]
+        char,
+    ),
+    OverviewFilterPop,
+    OverviewFilterClear,
     UpdateConfig {
         #[proptest(strategy = "arbitrary_layout_part().prop_map(Box::new)")]
         layout_config: Box<niri_config::LayoutPart>,
@@ -1616,6 +1642,15 @@ impl Op {
             }
             Op::ToggleOverview => {
                 layout.toggle_overview();
+            }
+            Op::OverviewFilterPush(ch) => {
+                layout.overview_filter_push(ch);
+            }
+            Op::OverviewFilterPop => {
+                layout.overview_filter_pop();
+            }
+            Op::OverviewFilterClear => {
+                layout.overview_filter_clear();
             }
             Op::UpdateConfig { layout_config } => {
                 let options = Options {
@@ -3902,6 +3937,108 @@ prop_compose! {
             ..Default::default()
         }
     }
+}
+
+#[test]
+fn filter_matches_tile_empty_always_matches() {
+    let w = TestWindow::new(TestWindowParams::new(1));
+    assert!(super::filter_matches_tile(&w, ""));
+}
+
+#[test]
+fn filter_matches_tile_no_title_no_app_id() {
+    let w = TestWindow::new(TestWindowParams::new(1));
+    assert!(!super::filter_matches_tile(&w, "anything"));
+}
+
+#[test]
+fn filter_matches_tile_by_title() {
+    let mut params = TestWindowParams::new(1);
+    params.title = Some("Firefox — Mozilla".to_owned());
+    let w = TestWindow::new(params);
+    // filter_matches_tile expects a pre-lowercased filter (apply_overview_filter does this)
+    assert!(super::filter_matches_tile(&w, "firefox"));
+    assert!(super::filter_matches_tile(&w, "mozilla"));
+    assert!(!super::filter_matches_tile(&w, "chrome"));
+}
+
+#[test]
+fn filter_matches_tile_by_app_id() {
+    let mut params = TestWindowParams::new(1);
+    params.app_id = Some("org.gnome.Nautilus".to_owned());
+    let w = TestWindow::new(params);
+    // filter_matches_tile expects a pre-lowercased filter (apply_overview_filter does this)
+    assert!(super::filter_matches_tile(&w, "nautilus"));
+    assert!(super::filter_matches_tile(&w, "gnome"));
+    assert!(!super::filter_matches_tile(&w, "files"));
+}
+
+#[test]
+fn filter_matches_tile_title_takes_priority_over_missing_app_id() {
+    let mut params = TestWindowParams::new(1);
+    params.title = Some("kitty".to_owned());
+    let w = TestWindow::new(params);
+    assert!(super::filter_matches_tile(&w, "kitty"));
+}
+
+#[test]
+fn overview_filter_push_pop_ascii() {
+    let mut layout: Layout<TestWindow> = Layout::default();
+    layout.overview_filter_push('a');
+    layout.overview_filter_push('b');
+    layout.overview_filter_push('c');
+    assert_eq!(layout.overview_filter_text(), "abc");
+    layout.overview_filter_pop();
+    assert_eq!(layout.overview_filter_text(), "ab");
+    layout.overview_filter_pop();
+    layout.overview_filter_pop();
+    assert_eq!(layout.overview_filter_text(), "");
+}
+
+#[test]
+fn overview_filter_pop_multibyte_unicode() {
+    let mut layout: Layout<TestWindow> = Layout::default();
+    layout.overview_filter_push('h');
+    layout.overview_filter_push('é'); // 2-byte UTF-8
+    layout.overview_filter_push('日'); // 3-byte UTF-8
+    assert_eq!(layout.overview_filter_text(), "hé日");
+    layout.overview_filter_pop();
+    assert_eq!(layout.overview_filter_text(), "hé");
+    layout.overview_filter_pop();
+    assert_eq!(layout.overview_filter_text(), "h");
+    layout.overview_filter_pop();
+    assert_eq!(layout.overview_filter_text(), "");
+    // Pop from empty — must not panic and must stay empty.
+    layout.overview_filter_pop();
+    assert_eq!(layout.overview_filter_text(), "");
+}
+
+#[test]
+fn overview_filter_clear() {
+    let mut layout: Layout<TestWindow> = Layout::default();
+    layout.overview_filter_push('x');
+    layout.overview_filter_push('y');
+    layout.overview_filter_clear();
+    assert_eq!(layout.overview_filter_text(), "");
+    // Second clear on already-empty filter must not panic.
+    layout.overview_filter_clear();
+    assert_eq!(layout.overview_filter_text(), "");
+}
+
+#[test]
+fn toggle_overview_clears_filter() {
+    let mut layout: Layout<TestWindow> = Layout::default();
+    layout.toggle_overview();
+    assert!(layout.is_overview_open());
+    layout.overview_filter_push('a');
+    layout.overview_filter_push('b');
+    assert_eq!(layout.overview_filter_text(), "ab");
+    layout.toggle_overview(); // close
+    assert!(!layout.is_overview_open());
+    assert_eq!(layout.overview_filter_text(), "");
+    // Reopen — filter should still be empty.
+    layout.toggle_overview();
+    assert_eq!(layout.overview_filter_text(), "");
 }
 
 proptest! {

@@ -366,6 +366,8 @@ pub enum Action {
     OpenOverview,
     CloseOverview,
     #[knuffel(skip)]
+    ClearOverviewFilter,
+    #[knuffel(skip)]
     ToggleWindowUrgent(u64),
     #[knuffel(skip)]
     SetWindowUrgent(u64),

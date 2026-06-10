@@ -435,7 +435,10 @@ impl<W: LayoutElement> Tile<W> {
         }
 
         if let Some(alpha) = &mut self.alpha_animation {
-            if !alpha.hold_after_done && alpha.anim.is_done() {
+            // Animations targeting full opacity are cleared when done. Animations targeting
+            // a lower opacity (e.g. overview filter dim) are kept alive so the tile stays
+            // dimmed without needing hold_after_done.
+            if !alpha.hold_after_done && alpha.anim.is_done() && alpha.anim.to() >= 1. {
                 self.alpha_animation = None;
             }
         }
@@ -646,6 +649,12 @@ impl<W: LayoutElement> Tile<W> {
             hold_after_done: false,
             offscreen,
         });
+    }
+
+    pub fn current_alpha(&self) -> f64 {
+        self.alpha_animation
+            .as_ref()
+            .map_or(1., |a| a.anim.clamped_value())
     }
 
     pub fn ensure_alpha_animates_to_1(&mut self) {

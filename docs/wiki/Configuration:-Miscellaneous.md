@@ -248,6 +248,24 @@ overview {
 }
 ```
 
+#### `filter-dim-opacity`
+
+<sup>Since: 26.05</sup>
+
+When the overview is open, you can type to filter windows by title or app ID.
+`filter-dim-opacity` controls the opacity of windows that do **not** match the current filter text.
+Accepts a float from `0.0` to `1.0`.
+
+The default `0.0` hides non-matching windows entirely.
+Set it higher to dim them instead.
+
+```kdl
+// Dim non-matching windows to 30% opacity instead of hiding them.
+overview {
+    filter-dim-opacity 0.3
+}
+```
+
 ### `xwayland-satellite`
 
 <sup>Since: 25.08</sup>

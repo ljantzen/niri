@@ -557,8 +557,38 @@ impl State {
                 if matches!(res, FilterResult::Forward) {
                     // If we didn't find any bind, try other hardcoded keys.
                     if this.niri.keyboard_focus.is_overview() && pressed {
-                        if let Some(bind) = raw.and_then(|raw| hardcoded_overview_bind(raw, *mods))
+                        // Text input for the overview filter.
+                        // Allow Shift / AltGr / Level5 because `modified` already carries
+                        // their effect (uppercase letters, accented chars, etc.).
+                        // Block Ctrl, Alt, Super so they remain available for binds.
+                        let layout_shifting_mods = Modifiers::SHIFT
+                            | Modifiers::ISO_LEVEL3_SHIFT
+                            | Modifiers::ISO_LEVEL5_SHIFT;
+                        if modifiers_from_state(*mods)
+                            .difference(layout_shifting_mods)
+                            .is_empty()
                         {
+                            if modified == Keysym::BackSpace {
+                                this.niri.layout.overview_filter_pop();
+                                this.niri.queue_redraw_all();
+                                this.niri.suppressed_keys.insert(key_code);
+                                return FilterResult::Intercept(None);
+                            }
+                            if let Some(ch) = keysym_to_filter_char(modified) {
+                                this.niri.layout.overview_filter_push(ch);
+                                this.niri.queue_redraw_all();
+                                this.niri.suppressed_keys.insert(key_code);
+                                return FilterResult::Intercept(None);
+                            }
+                        }
+
+                        if let Some(bind) = raw.and_then(|raw| {
+                            hardcoded_overview_bind(
+                                raw,
+                                *mods,
+                                this.niri.layout.overview_filter_text(),
+                            )
+                        }) {
                             this.niri.suppressed_keys.insert(key_code);
                             return FilterResult::Intercept(Some(bind));
                         }
@@ -2273,6 +2303,9 @@ impl State {
             }
             Action::ToggleOverview => {
                 self.niri.layout.toggle_overview();
+                if !self.niri.layout.is_overview_open() {
+                    self.niri.overview_filter_ui.invalidate();
+                }
                 self.niri.queue_redraw_all();
             }
             Action::OpenOverview => {
@@ -2282,8 +2315,13 @@ impl State {
             }
             Action::CloseOverview => {
                 if self.niri.layout.close_overview() {
+                    self.niri.overview_filter_ui.invalidate();
                     self.niri.queue_redraw_all();
                 }
+            }
+            Action::ClearOverviewFilter => {
+                self.niri.layout.overview_filter_clear();
+                self.niri.queue_redraw_all();
             }
             Action::ToggleWindowUrgent(id) => {
                 let window = self
@@ -2632,6 +2670,9 @@ impl State {
                     .unwrap_or(true)
             {
                 self.niri.layout.toggle_overview();
+                if !self.niri.layout.is_overview_open() {
+                    self.niri.overview_filter_ui.invalidate();
+                }
             }
             self.niri.pointer_inside_hot_corner = true;
         }
@@ -2719,6 +2760,9 @@ impl State {
                     .unwrap_or(true)
             {
                 self.niri.layout.toggle_overview();
+                if !self.niri.layout.is_overview_open() {
+                    self.niri.overview_filter_ui.invalidate();
+                }
             }
             self.niri.pointer_inside_hot_corner = true;
         }
@@ -4727,7 +4771,7 @@ fn allowed_during_screenshot(action: &Action) -> bool {
     )
 }
 
-fn hardcoded_overview_bind(raw: Keysym, mods: ModifiersState) -> Option<Bind> {
+fn hardcoded_overview_bind(raw: Keysym, mods: ModifiersState, filter: &str) -> Option<Bind> {
     let mods = modifiers_from_state(mods);
     if !mods.is_empty() {
         return None;
@@ -4735,7 +4779,15 @@ fn hardcoded_overview_bind(raw: Keysym, mods: ModifiersState) -> Option<Bind> {
 
     let mut repeat = true;
     let action = match raw {
-        Keysym::Escape | Keysym::Return => {
+        Keysym::Escape => {
+            repeat = false;
+            if filter.is_empty() {
+                Action::ToggleOverview
+            } else {
+                Action::ClearOverviewFilter
+            }
+        }
+        Keysym::Return => {
             repeat = false;
             Action::ToggleOverview
         }
@@ -4760,6 +4812,19 @@ fn hardcoded_overview_bind(raw: Keysym, mods: ModifiersState) -> Option<Bind> {
         allow_inhibiting: false,
         hotkey_overlay_title: None,
     })
+}
+
+fn keysym_to_filter_char(sym: Keysym) -> Option<char> {
+    let raw = u32::from(sym);
+    let cp = match raw {
+        0x0020..=0x007e => raw,
+        0x00a0..=0x00ff => raw,
+        0x01000100..=0x0110ffff => raw - 0x01000000,
+        _ => return None,
+    };
+    // Allow regular space but exclude other Unicode whitespace (e.g. NO-BREAK SPACE U+00A0),
+    // which would silently enter the filter and match nothing.
+    char::from_u32(cp).filter(|&c| !c.is_control() && (c == ' ' || !c.is_whitespace()))
 }
 
 pub fn apply_libinput_settings(config: &niri_config::Input, device: &mut input::Device) {
@@ -5547,5 +5612,97 @@ mod tests {
             ),
             None,
         );
+    }
+
+    #[test]
+    fn keysym_to_filter_char_ascii_printable() {
+        assert_eq!(keysym_to_filter_char(Keysym::space), Some(' '));
+        assert_eq!(keysym_to_filter_char(Keysym::a), Some('a'));
+        assert_eq!(keysym_to_filter_char(Keysym::z), Some('z'));
+        // tilde is the last ASCII printable (0x7E)
+        assert_eq!(keysym_to_filter_char(Keysym::new(0x007e)), Some('~'));
+    }
+
+    #[test]
+    fn keysym_to_filter_char_special_keys_return_none() {
+        assert_eq!(keysym_to_filter_char(Keysym::Escape), None);
+        assert_eq!(keysym_to_filter_char(Keysym::Return), None);
+        assert_eq!(keysym_to_filter_char(Keysym::BackSpace), None);
+        // Tab is a control character (0x09) — outside all mapped ranges but also filtered
+        // by is_control even if it somehow passed through.
+        assert_eq!(keysym_to_filter_char(Keysym::Tab), None);
+    }
+
+    #[test]
+    fn keysym_to_filter_char_latin1_supplement() {
+        // é = U+00E9, X11 keysym also 0x00E9
+        assert_eq!(keysym_to_filter_char(Keysym::new(0x00e9)), Some('é'));
+        // ÿ = U+00FF, last in the 0x00A0..=0x00FF range
+        assert_eq!(keysym_to_filter_char(Keysym::new(0x00ff)), Some('ÿ'));
+        // U+00A0 is NO-BREAK SPACE — must be excluded (silently breaks filter matching)
+        assert_eq!(keysym_to_filter_char(Keysym::new(0x00a0)), None);
+    }
+
+    #[test]
+    fn keysym_to_filter_char_unicode_keysym_range() {
+        // Ā = U+0100; Unicode keysym = 0x01000000 + 0x0100 = 0x01000100
+        assert_eq!(keysym_to_filter_char(Keysym::new(0x01000100)), Some('Ā'));
+        // 中 = U+4E2D; Unicode keysym = 0x01004E2D
+        assert_eq!(keysym_to_filter_char(Keysym::new(0x01004e2d)), Some('中'));
+    }
+
+    #[test]
+    fn hardcoded_overview_bind_escape_empty_filter_toggles_overview() {
+        let bind = hardcoded_overview_bind(Keysym::Escape, ModifiersState::default(), "");
+        assert!(matches!(
+            bind,
+            Some(Bind {
+                action: Action::ToggleOverview,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn hardcoded_overview_bind_escape_with_filter_clears_filter() {
+        let bind = hardcoded_overview_bind(Keysym::Escape, ModifiersState::default(), "foo");
+        assert!(matches!(
+            bind,
+            Some(Bind {
+                action: Action::ClearOverviewFilter,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn hardcoded_overview_bind_return_always_toggles_overview() {
+        let bind_empty = hardcoded_overview_bind(Keysym::Return, ModifiersState::default(), "");
+        assert!(matches!(
+            bind_empty,
+            Some(Bind {
+                action: Action::ToggleOverview,
+                ..
+            })
+        ));
+        let bind_filter =
+            hardcoded_overview_bind(Keysym::Return, ModifiersState::default(), "hello");
+        assert!(matches!(
+            bind_filter,
+            Some(Bind {
+                action: Action::ToggleOverview,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn hardcoded_overview_bind_with_modifiers_returns_none() {
+        let mods = ModifiersState {
+            shift: true,
+            ..Default::default()
+        };
+        assert!(hardcoded_overview_bind(Keysym::Escape, mods, "").is_none());
+        assert!(hardcoded_overview_bind(Keysym::Return, mods, "").is_none());
     }
 }

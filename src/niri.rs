@@ -170,6 +170,7 @@ use crate::ui::config_error_notification::ConfigErrorNotification;
 use crate::ui::exit_confirm_dialog::{ExitConfirmDialog, ExitConfirmDialogRenderElement};
 use crate::ui::hotkey_overlay::HotkeyOverlay;
 use crate::ui::mru::{MruCloseRequest, WindowMruUi, WindowMruUiRenderElement};
+use crate::ui::overview_filter::OverviewFilterUi;
 use crate::ui::screen_transition::{self, ScreenTransition};
 use crate::ui::screenshot_ui::{OutputScreenshot, ScreenshotUi, ScreenshotUiRenderElement};
 use crate::utils::scale::{closest_representable_scale, guess_monitor_scale};
@@ -393,6 +394,8 @@ pub struct Niri {
 
     pub window_mru_ui: WindowMruUi,
     pub pending_mru_commit: Option<PendingMruCommit>,
+
+    pub overview_filter_ui: OverviewFilterUi,
 
     pub pick_window: Option<async_channel::Sender<Option<MappedId>>>,
     pub pick_color: Option<async_channel::Sender<Option<niri_ipc::PickedColor>>>,
@@ -1456,6 +1459,8 @@ impl State {
         }
 
         self.niri.layout.update_config(&config);
+        // Reapply overview filter so dim_opacity changes take effect immediately.
+        self.niri.layout.reapply_overview_filter();
         for mapped in self.niri.mapped_layer_surfaces.values_mut() {
             mapped.update_config(&config);
         }
@@ -2615,6 +2620,8 @@ impl Niri {
 
             window_mru_ui,
             pending_mru_commit: None,
+
+            overview_filter_ui: OverviewFilterUi::new(),
 
             pick_window: None,
             pick_color: None,
@@ -4293,6 +4300,17 @@ impl Niri {
         // Draw the hotkey overlay on top.
         if let Some(element) = self.hotkey_overlay.render(ctx.renderer, output) {
             push(element.into());
+        }
+
+        // Overview filter bar (visible when overview is open and filter text is non-empty).
+        if self.layout.is_overview_open() {
+            let filter_text = self.layout.overview_filter_text().to_owned();
+            if let Some(elem) = self
+                .overview_filter_ui
+                .render(ctx.renderer, output, &filter_text)
+            {
+                push(elem.into());
+            }
         }
 
         // Then, the Alt-Tab switcher.
